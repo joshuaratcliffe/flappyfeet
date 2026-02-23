@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+<title>Flappy Feet</title>
+<style>
+  :root {
+    --bg1: #f7e3b0;
+    --bg2: #e8cc8a;
+    --dune1: #d8b36c;
+    --dune2: #c89b54;
+    --ui: #2a2a2a;
+  }
+  html, body { margin:0; height:100%; background:#000; overflow:hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  #wrap { position: fixed; inset: 0; display:grid; place-items:center; }
+  canvas { display:block; background:linear-gradient(180deg,var(--bg1),var(--bg2)); image-rendering: pixelated; image-rendering: crisp-edges; box-shadow: 0 8px 40px rgba(0,0,0,0.35), inset 0 0 80px rgba(255,255,255,0.1); border-radius: 10px; }
+  #hud { position:absolute; top:10px; left:50%; transform: translateX(-50%); color:#fff; text-shadow:0 2px 4px rgba(0,0,0,0.6); display:flex; gap:14px; font-weight:700; }
+  .pill { padding:6px 10px; background:rgba(0,0,0,0.35); border-radius:999px; font-size:14px; }
+  #caption { position:absolute; top:18%; left:50%; transform:translateX(-50%); color:#fff; font-weight:900; font-size: clamp(20px, 4.5vw, 44px); text-shadow: 0 4px 10px rgba(0,0,0,0.7), 0 0 14px rgba(110,59,0,0.6); opacity:0; transition:opacity .25s ease-out; pointer-events:none; white-space:nowrap; }
+  #overlay { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; }
+  .card { background: rgba(0,0,0,0.55); color:#fff; padding:16px 20px; border-radius:12px; text-align:center; max-width:90vw; pointer-events:auto; border:1px solid rgba(255,255,255,0.15); backdrop-filter: blur(2px); }
+  .title { font-weight:900; font-size: clamp(22px, 4.5vw, 36px); margin-bottom:8px; }
+  .sub { opacity:0.95; margin-bottom:12px; }
+  .kbd { display:inline-block; padding: 2px 6px; border-radius:6px; background:#222; border:1px solid #444; font-weight:700; }
+  .btn { display:inline-block; margin-top:8px; padding:8px 12px; border-radius:10px; background:#ffe08a; color:#3a2300; text-decoration:none; font-weight:800; box-shadow:0 4px 0 #c89b54; border:2px solid #6e3b00; cursor:pointer; }
+
+  /* Leaderboard styles */
+  .lb { margin-top:12px; }
+  .lb-table { width:100%; border-collapse:collapse; }
+  .lb-table th, .lb-table td { padding:4px 8px; }
+  .lb-table th { text-align:left; border-bottom:1px solid rgba(255,255,255,0.15); }
+  .lb-table td:last-child, .lb-table th:last-child { text-align:right; }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game" width="480" height="720" aria-label="Flappy Feet"></canvas>
+    <div id="hud">
+      <div class="pill">Score: <span id="score">0</span></div>
+      <div class="pill">Best: <span id="best">0</span></div>
+      <div class="pill">Status: <span id="status">Ready</span></div>
+    </div>
+    <div id="caption"></div>
+    <div id="overlay" aria-live="polite"></div>
+  </div>
+
+<script>
+const CANVAS = document.getElementById('game');
+const CTX = CANVAS.getContext('2d');
+CTX.imageSmoothingEnabled = false;
+
+const UI = {
+  score: document.getElementById('score'),
+  best: document.getElementById('best'),
+  status: document.getElementById('status'),
+  caption: document.getElementById('caption'),
+  overlay: document.getElementById('overlay')
+};
+
+const WORLD = { w: 480, h: 720 };
+let scale = 1; let rafId = null;
+
+// Game state flags
+let running = false;     // started via Start/Restart button only
+let playing = false;     // physics & pipes run only after first flap
+let frame = 0;
+
+const FORCE_FACE_RIGHT = true; // Flip sprite horizontally so it faces right
+const GRAVITY = 0.5;
+const FLAP = -8.5;
+const SCROLL_SPEED = 2.8;
+const GAP = 170;
+const SPAWN_EVERY = 105;
+const FEET_WIDTH = 96;
+const PLAYER_SIZE = 64;
+
+const CAPTIONS = [
+  'come on now',
+  'scoop it up',
+  "you're talking porkies",
+  'silly goose',
+  'dirty turkey'
+];
+
+/* Leaderboard (Top-5, local) */
+const LB_KEY = 'flappy-feet-leaderboard';
+const MAX_LEADERS = 5;
+
+function getLeaderboard(){
+  try { return JSON.parse(localStorage.getItem(LB_KEY)) || []; }
+  catch { return []; }
+}
+function setLeaderboard(arr){
+  localStorage.setItem(LB_KEY, JSON.stringify(arr));
+}
+function escapeHTML(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function renderLeaderboardHTML(){
+  const lb = getLeaderboard()
+    .slice()
+    .sort((a,b)=> b.score - a.score || a.date.localeCompare(b.date))
+    .slice(0, MAX_LEADERS);
+
+  if (!lb.length) return `<div class="lb sub">No scores yet — be the first!</div>`;
+
+  const rows = lb.map((e,i)=>
+    `<tr><td>${i+1}</td><td>${escapeHTML(e.name||'Unknown')}</td><td>${e.score}</td></tr>`
+  ).join('');
+
+  return `
+    <div class="lb">
+      <div class="sub" style="margin-bottom:6px;">Top ${MAX_LEADERS}</div>
+      <table class="lb-table">
+        <thead><tr><th>#</th><th>Name</th><th>Score</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+function getQualifyingRankForScore(s){
+  if (s <= 0) return -1;
+  const lb = getLeaderboard();
+  const marker = { name:'__CANDIDATE__', score:s, date:new Date(0).toISOString() };
+  const trial = lb.concat([marker])
+    .sort((a,b)=> b.score - a.score || a.date.localeCompare(b.date));
+  const idx = trial.findIndex(e => e === marker);
+  return idx < MAX_LEADERS ? idx : -1;
+}
+
+let best = +(localStorage.getItem('flappy-feet-best') || 0);
+UI.best.textContent = best;
+
+let player, pipes, dunes; let score = 0;
+
+// Embedded sprite (no external files)
+const CHARACTER_DATA_URI = 'data:image/png;base64,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';
+
+/* Utils */
+const clamp = (v, lo, hi)=> Math.max(lo, Math.min(hi, v));
+const choice = (arr)=> arr[(Math.random()*arr.length)|0];
+
+// Remove white-ish background from uploaded sprite
+function chromaKeyWhite(img, thr=248){
+  const off = document.createElement('canvas');
+  off.width = img.width; off.height = img.height;
+  const cx = off.getContext('2d');
+  cx.drawImage(img,0,0);
+  const d = cx.getImageData(0,0,off.width,off.height);
+  const px = d.data;
+  for (let i=0;i<px.length;i+=4){
+    const r=px[i], g=px[i+1], b=px[i+2];
+    if (r>=thr && g>=thr && b>=thr) px[i+3]=0;
+  }
+  cx.putImageData(d,0,0);
+  return off;
+}
+
+function fitCanvas(){
+  const ww = window.innerWidth, wh = window.innerHeight;
+  const s = Math.min(ww/WORLD.w, wh/WORLD.h);
+  scale = s;
+  CANVAS.style.width = `${WORLD.w}px`;
+  CANVAS.style.height = `${WORLD.h}px`;
+  CANVAS.style.transform = `scale(${s})`;
+  CANVAS.style.transformOrigin = 'top left';
+  document.getElementById('wrap').style.height = `${WORLD.h*s}px`;
+}
+
+/* Background dunes */
+function newDunes(){
+  // Cache colors once (micro-optimization)
+  const root = getComputedStyle(document.documentElement);
+  const dune1 = root.getPropertyValue('--dune1').trim();
+  const dune2 = root.getPropertyValue('--dune2').trim();
+
+  return { t:0,
+    draw(ctx){
+      const w=WORLD.w, h=WORLD.h;
+      const layers=[
+        { color:dune1, amp:12, kx:0.008, base:h*0.72, speed:0.2 },
+        { color:dune2, amp:20, kx:0.006, base:h*0.80, speed:0.35 }
+      ];
+      for (const L of layers){
+        ctx.fillStyle = L.color;
+        ctx.beginPath(); ctx.moveTo(0,h);
+        for (let x=0;x<=w;x+=4){
+          const y = L.base + Math.sin((x+this.t*L.speed)*L.kx)*L.amp + Math.cos((x+this.t*L.speed)*L.kx*0.6)*L.amp*0.35;
+          ctx.lineTo(x, y);
+        }
+        ctx.lineTo(w,h); ctx.closePath(); ctx.fill();
+      }
+      this.t++;
+    }
+  };
+}
+
+/* Feet pillars */
+function drawFoot(ctx, x, topY, height, fromTop, skin='#f1b78c', outline='#a0612e'){
+  const legW = FEET_WIDTH*0.5; const footL = FEET_WIDTH*0.75; const toeR = FEET_WIDTH*0.09;
+  ctx.save(); ctx.translate(x, topY);
+  if (!fromTop){ ctx.translate(0,height); ctx.scale(1,-1); }
+  ctx.fillStyle=skin; ctx.strokeStyle=outline; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.rect((FEET_WIDTH-legW)/2, 0, legW, height-footL); ctx.fill(); ctx.stroke();
+  const y = height-footL; ctx.beginPath();
+  ctx.moveTo((FEET_WIDTH-legW)/2, y + footL*0.25);
+  ctx.quadraticCurveTo(FEET_WIDTH*0.1, y + footL*0.5, FEET_WIDTH*0.25, y + footL*0.65);
+  ctx.quadraticCurveTo(FEET_WIDTH*0.52, y + footL*0.95, FEET_WIDTH*0.75, y + footL*0.70);
+  ctx.quadraticCurveTo(FEET_WIDTH*0.85, y + footL*0.45, (FEET_WIDTH+legW)/2, y + footL*0.25);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  const toeBaseY = y + footL*0.85;
+  const centers=[{x:FEET_WIDTH*0.70,r:toeR*1.2},{x:FEET_WIDTH*0.62,r:toeR*1.05},{x:FEET_WIDTH*0.54,r:toeR*0.95},{x:FEET_WIDTH*0.47,r:toeR*0.9}];
+  for(const c of centers){ ctx.beginPath(); ctx.arc(c.x, toeBaseY, c.r, 0, Math.PI*2); ctx.fill(); ctx.stroke(); }
+  ctx.restore();
+}
+
+function newPipes(){
+  const list=[]; let lastSpawn=-9999;
+  return {
+    list,
+    update(){
+      if (!playing) return; // Do not spawn/move until first flap
+      if (frame - lastSpawn >= SPAWN_EVERY){
+        lastSpawn = frame;
+        const minTop=60, minBottom=100;
+        const maxGapTop = WORLD.h - minBottom - GAP;
+        const topHeight = Math.max(minTop, Math.min(maxGapTop, Math.random()*(maxGapTop-minTop)+minTop));
+        const bottomHeight = WORLD.h - topHeight - GAP;
+        list.push({ x: WORLD.w+FEET_WIDTH, top: topHeight, bottom: bottomHeight, passed:false });
+      }
+      for (const p of list) p.x -= SCROLL_SPEED;
+      while(list.length && list[0].x < -FEET_WIDTH-50) list.shift();
+    },
+    draw(ctx){
+      for(const p of list){
+        drawFoot(ctx, p.x, 0, p.top, true);
+        drawFoot(ctx, p.x, WORLD.h - p.bottom, p.bottom, false);
+      }
+    }
+  };
+}
+
+/* Player */
+function newPlayer(sprite){
+  const aspect = sprite.width/sprite.height;
+  const w = Math.round(PLAYER_SIZE*aspect), h = PLAYER_SIZE;
+  const flipX = FORCE_FACE_RIGHT ? true : false;
+  return {
+    x: WORLD.w*0.28,
+    y: WORLD.h*0.45,
+    w, h,
+    vy: 0,
+    rot: 0,
+    alive: true,
+    resetPose(){ this.y = WORLD.h*0.45; this.vy = 0; this.rot = 0; },
+    flap(){ if(!this.alive) return; this.vy = FLAP; this.rot = -0.35; },
+    update(){
+      if (!playing) return; // Freeze until first flap
+      this.vy += GRAVITY; this.y += this.vy; this.rot = clamp(this.rot+0.02, -0.5, 0.6);
+      if (this.y < 0){ this.y=0; this.vy=0; }
+      if (this.y + this.h > WORLD.h){ this.y = WORLD.h - this.h; this.alive=false; gameOver(); }
+    },
+    draw(ctx){
+      ctx.save(); ctx.translate(this.x+this.w/2, this.y+this.h/2); ctx.rotate(this.rot); if(flipX) ctx.scale(-1,1);
+      ctx.drawImage(sprite, -this.w/2, -this.h/2, this.w, this.h); ctx.restore();
+    },
+    aabb(){ const pad=6; return { x:this.x+pad, y:this.y+pad, w:this.w-2*pad, h:this.h-2*pad }; }
+  };
+}
+
+function hitTest(player, list){
+  const b = player.aabb();
+  for(const p of list){
+    const topRect={x:p.x+FEET_WIDTH*0.22,y:0,w:FEET_WIDTH*0.56,h:p.top-FEET_WIDTH*0.15};
+    const botRect={x:p.x+FEET_WIDTH*0.22,y:WORLD.h-p.bottom+FEET_WIDTH*0.15,w:FEET_WIDTH*0.56,h:p.bottom-FEET_WIDTH*0.15};
+    const A=!(b.x>topRect.x+topRect.w||b.x+b.w<topRect.x||b.y>topRect.y+topRect.h||b.y+b.h<topRect.y);
+    const B=!(b.x>botRect.x+botRect.w||b.x+b.w<botRect.x||b.y>botRect.y+botRect.h||b.y+b.h<botRect.y);
+    if (A||B) return true;
+  }
+  return false;
+}
+
+/* Flow */
+function setScore(v){ score=v; UI.score.textContent=v; }
+function showCaption(text){ UI.caption.textContent=text; UI.caption.style.opacity='1'; clearTimeout(showCaption._t); showCaption._t=setTimeout(()=>UI.caption.style.opacity='0', 900); }
+
+function showStartOverlay(){
+  UI.overlay.innerHTML = `
+    <div class="card">
+      <div class="title">Flappy Feet</div>
+      <div class="sub">Click <b>Start</b>, then click/tap or press <span class="kbd">Space</span> to flap.</div>
+      <button class="btn" id="btnStart">Start</button>
+      ${renderLeaderboardHTML()}
+    </div>`;
+  const btn = document.getElementById('btnStart');
+  btn.addEventListener('click', (e)=>{ e.stopPropagation(); startGame(); });
+}
+
+function startGame(){
+  // Start button only toggles into 'running but waiting for first flap'
+  UI.overlay.innerHTML = '';
+  running = true; playing = false; frame = 0; setScore(0);
+  dunes = newDunes(); pipes = newPipes();
+  player.resetPose(); player.alive = true;
+  UI.status.textContent = 'Get Ready';
+}
+
+function firstFlap(){
+  if (!running) return;
+  if (!playing) UI.status.textContent = 'Go!';
+  playing = true; player.flap();
+}
+
+function gameOver(){
+  if (!running) return;
+  running = false; playing = false; UI.status.textContent = 'Crashed';
+  if (score > best){ best = score; localStorage.setItem('flappy-feet-best', best); UI.best.textContent = best; }
+
+  const rank = getQualifyingRankForScore(score);
+  if (rank !== -1) {
+    showNameEntryForScore(score, rank);
+  } else {
+    showGameOverCard();
+  }
+}
+
+function restartGame(){
+  // Same as start, but without reloading page
+  showStartOverlay();
+}
+
+function showGameOverCard(){
+  UI.overlay.innerHTML = `
+    <div class="card">
+      <div class="title">Game Over</div>
+      <div class="sub">Score: <b>${score}</b> • Best: <b>${best}</b></div>
+      ${renderLeaderboardHTML()}
+      <button class="btn" id="btnRestart">Restart</button>
+    </div>`;
+  const btn = document.getElementById('btnRestart');
+  btn.addEventListener('click', (e)=>{ e.stopPropagation(); restartGame(); });
+}
+
+function showNameEntryForScore(s, rank){
+  UI.overlay.innerHTML = `
+    <div class="card">
+      <div class="title">New Top ${MAX_LEADERS}!</div>
+      <div class="sub">You placed <b>#${rank+1}</b> with a score of <b>${s}</b>. Enter your name:</div>
+      <input id="nameInput" type="text" maxlength="16" placeholder="Your name"
+             style="padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#fff;width:220px;">
+      <div style="margin-top:10px; display:flex; gap:10px; justify-content:center;">
+        <button class="btn" id="btnSaveName">Save</button>
+        <button class="btn" id="btnSkip">Skip</button>
+      </div>
+    </div>`;
+
+  const input = document.getElementById('nameInput');
+  const save = () => {
+    const raw = (input.value || '').trim();
+    const name = raw ? raw.slice(0,16) : 'Player';
+
+    const lb = getLeaderboard();
+    lb.push({ name, score: s, date: new Date().toISOString() });
+    const sorted = lb.sort((a,b)=> b.score - a.score || a.date.localeCompare(b.date))
+                     .slice(0, MAX_LEADERS);
+    setLeaderboard(sorted);
+
+    showGameOverCard();
+  };
+
+  document.getElementById('btnSaveName').addEventListener('click', (e)=>{ e.stopPropagation(); save(); });
+  document.getElementById('btnSkip').addEventListener('click', (e)=>{ e.stopPropagation(); showGameOverCard(); });
+  input.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') save(); });
+
+  setTimeout(()=> input.focus(), 0);
+}
+
+/* Main loop */
+function loop(){
+  update(); draw();
+  rafId = requestAnimationFrame(loop);
+}
+
+function update(){
+  frame++;
+  // Dunes can animate always for subtle life (state increment is in draw)
+  if (pipes) pipes.update();
+  if (player) player.update();
+  if (running && playing){
+    for (const p of pipes.list){
+      if (!p.passed && p.x + FEET_WIDTH < player.x){ p.passed = true; setScore(score+1); showCaption(choice(CAPTIONS)); }
+    }
+    if (hitTest(player, pipes.list)){ player.alive=false; gameOver(); }
+  }
+}
+
+function draw(){
+  CTX.save(); CTX.clearRect(0,0,WORLD.w,WORLD.h);
+  if (dunes) dunes.draw(CTX);
+  if (pipes) pipes.draw(CTX);
+  if (player) player.draw(CTX);
+  const grd=CTX.createLinearGradient(0,0,0,60); grd.addColorStop(0,'rgba(0,0,0,0.25)'); grd.addColorStop(1,'rgba(0,0,0,0)');
+  CTX.fillStyle = grd; CTX.fillRect(0,0,WORLD.w,60);
+  CTX.restore();
+}
+
+/* Input: canvas only (so buttons work and no global clicks start the game) */
+function onCanvasPointerDown(){
+  if (!running) return;           // Must click Start button first
+  if (!playing) { firstFlap(); return; }
+  if (player && player.alive) player.flap();
+}
+CANVAS.addEventListener('pointerdown', onCanvasPointerDown);
+window.addEventListener('keydown', (e)=>{
+  if (e.code === 'Space'){
+    e.preventDefault();
+    if (!running) return;         // Space does nothing until Start is clicked
+    if (!playing) { firstFlap(); return; }
+    if (player && player.alive) player.flap();
+  } else if (e.key.toLowerCase() === 'r') {
+    // Allow keyboard restart as well
+    if (!running) restartGame();
+  } else if (e.key.toLowerCase() === 'p') {
+    // Optional pause when playing (could be added)
+  }
+});
+
+/* Init */
+function init(){
+  fitCanvas();
+  const img = new Image();
+  img.onload = ()=>{
+    const keyed = chromaKeyWhite(img, 246);
+    player = newPlayer(keyed);
+    dunes = newDunes();
+    pipes = newPipes();
+    showStartOverlay();
+    draw();
+  };
+  img.src = CHARACTER_DATA_URI;
+}
+window.addEventListener('resize', fitCanvas);
+init();
+loop();
+</script>
+</body>
+</html>
